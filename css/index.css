@@ -921,6 +921,7 @@ main {
 .ad-vertical--left {
   align-items: flex-end;
   justify-content: flex-start;
+  text-align: left;
 }
 
 .ad-vertical--center {

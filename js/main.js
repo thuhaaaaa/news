@@ -48,6 +48,7 @@ const uiElements = {
 	weatherWidgetIconEl: null,
 	weatherWidgetTempEl: null,
 	weatherWidgetMetaEl: null,
+	weatherHighlightCityEl: null,
 	weatherHighlightTimeEl: null,
 	weatherHighlightIconEl: null,
 	weatherHighlightTempEl: null,
@@ -64,6 +65,7 @@ const bindUiElements = () => {
 	uiElements.weatherWidgetIconEl = document.getElementById("weather-widget-icon");
 	uiElements.weatherWidgetTempEl = document.getElementById("weather-widget-temp");
 	uiElements.weatherWidgetMetaEl = document.getElementById("weather-widget-meta");
+	uiElements.weatherHighlightCityEl = document.getElementById("weather-highlight-city");
 	uiElements.weatherHighlightTimeEl = document.getElementById("weather-highlight-time");
 	uiElements.weatherHighlightIconEl = document.getElementById("weather-highlight-icon");
 	uiElements.weatherHighlightTempEl = document.getElementById("weather-highlight-temp");
@@ -112,10 +114,14 @@ const startLiveDate = () => {
 	liveDateTimerId = setInterval(updateLiveDate, 60 * 1000);
 };
 
-const WEATHER_CITY = "TP.HCM";
-const WEATHER_LAT = 10.8231;
-const WEATHER_LON = 106.6297;
-const WEATHER_TZ = "Asia/Bangkok";
+const DEFAULT_WEATHER_LOCATION = {
+	name: "TP.HCM",
+	latitude: 10.8231,
+	longitude: 106.6297,
+	timezone: "Asia/Bangkok",
+};
+
+let activeWeatherLocation = DEFAULT_WEATHER_LOCATION;
 
 const formatUpdateTime = (date) => {
 	const hours = date.getHours();
@@ -124,6 +130,15 @@ const formatUpdateTime = (date) => {
 	const hour12 = hours % 12 === 0 ? 12 : hours % 12;
 
 	return `Cập nhật lúc ${pad2(hour12)}:${minutes} ${period}`;
+};
+
+const formatForecastDay = (dateText) => {
+	const date = new Date(`${dateText}T00:00:00`);
+	const dayRaw = new Intl.DateTimeFormat("vi-VN", {
+		weekday: "long",
+	}).format(date);
+
+	return dayRaw.charAt(0).toUpperCase() + dayRaw.slice(1);
 };
 
 const getWeatherDescription = (code) => {
@@ -189,8 +204,52 @@ const getAqiLabel = (aqi) => {
 	return "Nguy hại";
 };
 
-const updateWeatherUI = (current, aqiValue) => {
-	if (!current || !uiElements.weatherWidgetTempEl) {
+const updateForecastUI = (daily) => {
+	if (!daily) {
+		return;
+	}
+
+	const forecastItems = document.querySelectorAll(".weather-highlight__forecast-item");
+	if (!forecastItems.length) {
+		return;
+	}
+
+	const dailyForecasts = (daily.time || []).map((dateText, index) => ({
+		dateText,
+		weatherCode: daily.weather_code?.[index],
+		maxTemp: daily.temperature_2m_max?.[index],
+		minTemp: daily.temperature_2m_min?.[index],
+	})).slice(1, 4);
+
+	forecastItems.forEach((item, index) => {
+		const forecast = dailyForecasts[index];
+		if (!forecast) {
+			return;
+		}
+
+		const { text, icon } = getWeatherDescription(forecast.weatherCode);
+		const dayEl = item.querySelector(".weather-highlight__forecast-day");
+		const iconEl = item.querySelector(".weather-highlight__forecast-icon");
+		const tempEl = item.querySelector(".weather-highlight__forecast-temp");
+		const descEl = item.querySelector(".weather-highlight__forecast-desc");
+
+		if (dayEl) {
+			dayEl.textContent = formatForecastDay(forecast.dateText);
+		}
+		if (iconEl) {
+			iconEl.textContent = icon;
+		}
+		if (tempEl && Number.isFinite(forecast.maxTemp) && Number.isFinite(forecast.minTemp)) {
+			tempEl.textContent = `${Math.round(forecast.maxTemp)}°/${Math.round(forecast.minTemp)}°`;
+		}
+		if (descEl) {
+			descEl.textContent = text;
+		}
+	});
+};
+
+const updateWeatherUI = (current, daily, aqiValue, location) => {
+	if (!current) {
 		return;
 	}
 
@@ -201,15 +260,21 @@ const updateWeatherUI = (current, aqiValue) => {
 	const uvIndex = Math.round(current.uv_index ?? 0);
 	const weatherCode = current.weather_code;
 	const { text, icon } = getWeatherDescription(weatherCode);
+	const locationName = location?.name || DEFAULT_WEATHER_LOCATION.name;
 
 	if (uiElements.weatherWidgetIconEl) {
 		uiElements.weatherWidgetIconEl.textContent = icon;
 	}
-	uiElements.weatherWidgetTempEl.textContent = `${WEATHER_CITY} ${temperature}°C`;
+	if (uiElements.weatherWidgetTempEl) {
+		uiElements.weatherWidgetTempEl.textContent = `${locationName} ${temperature}°C`;
+	}
 	if (uiElements.weatherWidgetMetaEl) {
 		uiElements.weatherWidgetMetaEl.textContent = `${text} · Độ ẩm ${humidity}%`;
 	}
 
+	if (uiElements.weatherHighlightCityEl) {
+		uiElements.weatherHighlightCityEl.textContent = locationName;
+	}
 	if (uiElements.weatherHighlightIconEl) {
 		uiElements.weatherHighlightIconEl.textContent = icon;
 	}
@@ -242,15 +307,79 @@ const updateWeatherUI = (current, aqiValue) => {
 	if (uiElements.weatherHighlightTimeEl) {
 		uiElements.weatherHighlightTimeEl.textContent = formatUpdateTime(new Date());
 	}
+
+	updateForecastUI(daily);
+};
+
+const getProvinceNameFromCoords = async (latitude, longitude) => {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), 4000);
+	const locationUrl = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=vi`;
+
+	try {
+		const response = await fetch(locationUrl, {
+			signal: controller.signal,
+		});
+
+		if (!response.ok) {
+			return null;
+		}
+
+		const data = await response.json();
+		const provinceName = data.principalSubdivision || data.city || data.locality || data.countryName;
+		return typeof provinceName === "string" && provinceName.trim() ? provinceName.trim() : null;
+	} catch (error) {
+		return null;
+	} finally {
+		clearTimeout(timeoutId);
+	}
+};
+
+const getBrowserWeatherLocation = () => new Promise((resolve) => {
+	if (!navigator.geolocation) {
+		resolve(DEFAULT_WEATHER_LOCATION);
+		return;
+	}
+
+	if (uiElements.weatherHighlightTimeEl) {
+		uiElements.weatherHighlightTimeEl.textContent = "Đang xác định vị trí...";
+	}
+
+	navigator.geolocation.getCurrentPosition(
+		async (position) => {
+			const latitude = position.coords.latitude;
+			const longitude = position.coords.longitude;
+			const provinceName = await getProvinceNameFromCoords(latitude, longitude);
+
+			resolve({
+				name: provinceName || "Vị trí hiện tại",
+				latitude,
+				longitude,
+				timezone: "auto",
+			});
+		},
+		() => resolve(DEFAULT_WEATHER_LOCATION),
+		{
+			enableHighAccuracy: false,
+			maximumAge: 15 * 60 * 1000,
+			timeout: 6000,
+		}
+	);
+});
+
+const setActiveWeatherLocation = async () => {
+	activeWeatherLocation = await getBrowserWeatherLocation();
 };
 
 const fetchWeather = async () => {
-	const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,uv_index&timezone=${encodeURIComponent(WEATHER_TZ)}`;
-	const aqiUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}&current=us_aqi&timezone=${encodeURIComponent(WEATHER_TZ)}`;
+	const { latitude, longitude, timezone } = activeWeatherLocation;
+	const encodedTimezone = encodeURIComponent(timezone);
+	const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,uv_index&daily=weather_code,temperature_2m_max,temperature_2m_min&forecast_days=4&timezone=${encodedTimezone}`;
+	const aqiUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${latitude}&longitude=${longitude}&current=us_aqi&timezone=${encodedTimezone}`;
 
 	const [weatherResponse, aqiResponse] = await Promise.all([
 		fetch(weatherUrl),
-		fetch(aqiUrl),
+		fetch(aqiUrl).catch(() => null),
 	]);
 
 	if (!weatherResponse.ok) {
@@ -258,10 +387,10 @@ const fetchWeather = async () => {
 	}
 
 	const weatherData = await weatherResponse.json();
-	const aqiData = aqiResponse.ok ? await aqiResponse.json() : null;
+	const aqiData = aqiResponse?.ok ? await aqiResponse.json() : null;
 	const aqiValue = aqiData?.current?.us_aqi;
 
-	updateWeatherUI(weatherData.current, aqiValue);
+	updateWeatherUI(weatherData.current, weatherData.daily, aqiValue, activeWeatherLocation);
 };
 
 let weatherTimerId = null;
@@ -282,7 +411,7 @@ const startWeatherUpdates = () => {
 			}
 		});
 
-	runFetch();
+	setActiveWeatherLocation().finally(runFetch);
 	weatherTimerId = setInterval(runFetch, 10 * 60 * 1000);
 };
 
